@@ -1,8 +1,8 @@
-name: 'Release'
+name: Release
 
 on:
   release:
-    types: [ published ]
+    types: [published]
 
 jobs:
   build:
@@ -20,10 +20,138 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 50
-      - run: git fetch origin --tags
-        shell: bash
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: ./.github/actions/gradle-setup
+
       - name: Сборка с помощью Gradle
-        run: ./gradlew printProjectVersion build publish
-        
+        run: ./gradlew printProjectVersion build publish -x check --max-workers 1
+        env:
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_KEY_PASSWORD }}
+
+      - name: Подготовка метаданных артефакта
+        id: prepare_artifact_metadata
+        shell: bash
+        run: |
+          VERSION=$(./gradlew -q printProjectVersion | tail -n1 | tr -d '[:space:]')
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_PATH=./build/libs/guideme-$VERSION.jar" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_NAME=guideme-$VERSION.jar" >> "$GITHUB_OUTPUT"
+          echo "JAVADOC_PATH=./build/libs/guideme-$VERSION-javadoc.jar" >> "$GITHUB_OUTPUT"
+          echo "JAVADOC_NAME=guideme-$VERSION-javadoc.jar" >> "$GITHUB_OUTPUT"
+          echo "API_PATH=./build/libs/guideme-$VERSION-api.jar" >> "$GITHUB_OUTPUT"
+          echo "API_NAME=guideme-$VERSION-api.jar" >> "$GITHUB_OUTPUT"
+
+      - name: Архивировать результаты сборки
+        run: tar -I zstd -cf build.tar.zst build/libs build/repo
+
+      - name: Загрузить артефакты сборки
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: build.tar.zst
+          if-no-files-found: error
+          retention-days: 3
+
+  upload-release-artifacts:
+    name: Загрузить артефакты релиза
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+
+      - run: tar axf build.tar.zst
+
+      - name: Приложить файлы к релизу
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            ${{ needs.build.outputs.ARTIFACT_PATH }}
+            ${{ needs.build.outputs.JAVADOC_PATH }}
+            ${{ needs.build.outputs.API_PATH }}
+
+  deploy-github-packages:
+    name: Развертывание в GitHub Packages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+      - run: tar axf build.tar.zst
+      - run: test -d ./build
+      - name: Опубликовать в GitHub Packages
+        uses: AppliedEnergistics/maven-publish-action@main
+        with:
+          local-repository-path: build/repo
+          remote-repository-url: https://maven.pkg.github.com/AppliedEnergistics/GuideME/
+          remote-repository-username: ${{ github.actor }}
+          remote-repository-password: ${{ github.token }}
+
+  deploy-maven-central:
+    name: Развертывание в Maven Central
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+      - run: tar axf build.tar.zst
+      - run: test -d ./build
+      - name: Опубликовать в Maven Central
+        uses: AppliedEnergistics/maven-central-publish-action@main
+        with:
+          local-repository-path: build/repo
+          username: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          password: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+
+  deploy-curseforge:
+    name: Развернуть на CurseForge
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+      - run: tar axf build.tar.zst
+      - run: test -d ./build
+      - name: Загрузить на CurseForge
+        uses: Kira-NT/mc-publish@52307b03863581dec6b652b83e597aec02ebb075
+        with:
+          name: GuideME ${{ needs.build.outputs.VERSION }}
+          version: ${{ needs.build.outputs.VERSION }}
+          files: ${{ needs.build.outputs.ARTIFACT_PATH }}
+          curseforge-id: 1173950
+          curseforge-token: ${{ secrets.CURSEFORGE }}
+          loaders: neoforge
+          environment: "*"
+
+  deploy-modrinth:
+    name: Развертывание в Modrinth
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+      - run: tar axf build.tar.zst
+      - run: test -d ./build
+      - name: Загрузить в Modrinth
+        uses: Kira-NT/mc-publish@52307b03863581dec6b652b83e597aec02ebb075
+        with:
+          name: GuideME ${{ needs.build.outputs.VERSION }}
+          version: ${{ needs.build.outputs.VERSION }}
+          files: ${{ needs.build.outputs.ARTIFACT_PATH }}
+          modrinth-id: Ck4E7v7R
+          modrinth-token: ${{ secrets.MODRINTH }}
+          loaders: neoforge
+          environment: "*"
